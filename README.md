@@ -38,11 +38,17 @@ streamlit run app.py
 | View | Purpose |
 | --- | --- |
 | Overview | Loaded bundle summary and quick Kd snapshot |
+| Comparison Index | Build a navigation CSV with experiment metadata, peak summaries, and links to exported plot PNGs |
 | Processing Inputs | Compare signal-processing settings and detect differences |
 | Scan Metrics | Reconstruct metric-vs-scan plots from `results.csv` |
 | Titration | Reconstruct plateau-vs-concentration plots from `titration_steps.csv` |
 | Langmuir / Kd | Compare Kd values and reconstructed Langmuir fits |
 | Tables | Inspect and download combined CSV tables |
+
+The `Comparison Index` view can download a readable `comparison_summary.csv`, a
+zip containing that CSV plus plot PNG files, or an HTML report with plots visible
+inline. The CSV keeps plot filenames, vlines, and SWV-style parameters as regular
+comparison columns.
 
 ## Design Notes
 
@@ -61,4 +67,3 @@ experiment_compare_app/
     io.py
     plots.py
 ```
-

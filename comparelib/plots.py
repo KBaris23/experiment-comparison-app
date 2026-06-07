@@ -28,6 +28,9 @@ def plot_metric_vs_scan(
     experiments: Iterable[str],
     channels: Iterable[int],
     x_col: str = "scan_number",
+    show_legend: bool = True,
+    legend_style: str = "experiment_channel",
+    reference_x_values: Optional[Iterable[object]] = None,
 ):
     df = _filtered(results, experiments, channels)
     if df.empty or metric not in df.columns or x_col not in df.columns:
@@ -43,18 +46,44 @@ def plot_metric_vs_scan(
     fig, ax = plt.subplots(figsize=(10, 4.6))
     for (experiment, channel), group in df.groupby(["experiment_label", "channel"], dropna=False):
         group = group.sort_values(x_col)
+        if not show_legend:
+            label = None
+        elif legend_style == "channel":
+            label = f"Ch{channel}"
+        else:
+            label = f"{experiment} | Ch{channel}"
         ax.plot(
             group[x_col],
             group[metric],
             marker="o",
             markersize=3,
             linewidth=1.4,
-            label=f"{experiment} | Ch{channel}",
+            label=label,
         )
     ax.set_xlabel(x_col.replace("_", " ").title())
     ax.set_ylabel(metric)
     ax.set_title(f"{metric} vs {x_col}")
-    ax.legend(fontsize=7, loc="best")
+    for item in reference_x_values or []:
+        if isinstance(item, dict):
+            value = item.get("scan", item.get("x", item.get("scan_number")))
+            text = str(item.get("label") or "").strip()
+        else:
+            value = item
+            text = ""
+        value = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+        if pd.isna(value):
+            continue
+        ax.axvline(
+            float(value),
+            color="tab:red",
+            linestyle="--",
+            linewidth=1.0,
+            alpha=0.45,
+        )
+        if text:
+            ax.text(float(value), 0.98, text, rotation=90, va="top", ha="right", fontsize=7, alpha=0.75, transform=ax.get_xaxis_transform())
+    if show_legend:
+        ax.legend(fontsize=7, loc="best")
     ax.grid(alpha=0.2)
     fig.tight_layout()
     return fig
@@ -200,4 +229,3 @@ def plot_kd_comparison(langmuir_summary: pd.DataFrame, metric_label: Optional[st
     ax.grid(axis="x", alpha=0.2)
     fig.tight_layout()
     return fig
-

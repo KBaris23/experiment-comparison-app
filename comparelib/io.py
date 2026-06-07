@@ -127,7 +127,8 @@ def manifest_summary(bundles: Iterable[ExperimentBundle]) -> pd.DataFrame:
     rows = []
     for bundle in bundles:
         files = bundle.manifest.get("files") or {}
-        rows.append({
+        metadata = bundle.manifest.get("metadata") or {}
+        row = {
             "experiment_label": bundle_label(bundle),
             "experiment_name": bundle.experiment_name,
             "analysis_mode": bundle.analysis_mode,
@@ -138,7 +139,10 @@ def manifest_summary(bundles: Iterable[ExperimentBundle]) -> pd.DataFrame:
             "has_results": "results" in files,
             "has_titration_steps": "titration_steps" in files,
             "has_langmuir_fit_summary": "langmuir_fit_summary" in files,
-        })
+        }
+        for key, value in metadata.items():
+            row[key] = value
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -152,4 +156,3 @@ def numeric_columns(df: pd.DataFrame, exclude: Optional[Iterable[str]] = None) -
         if series.notna().any():
             cols.append(col)
     return cols
-
