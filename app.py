@@ -20,6 +20,11 @@ from typing import List
 import pandas as pd
 import streamlit as st
 
+from comparelib.channels import (
+    channel_union,
+    filter_successful_channels,
+    successful_channel_map,
+)
 from comparelib.io import (
     bundle_label,
     combine_table,
@@ -87,6 +92,17 @@ def filter_by_metric_label(df: pd.DataFrame, metric_label: str) -> pd.DataFrame:
     if df.empty or "metric_label" not in df.columns:
         return df
     return df[df["metric_label"].astype(str) == str(metric_label)]
+
+
+def restrict_channel_map(channel_map: dict[str, set[int]], channels: List[int]) -> dict[str, set[int]]:
+    if not channels:
+        return {}
+    selected = set(channels)
+    return {
+        label: values & selected
+        for label, values in channel_map.items()
+        if values & selected
+    }
 
 
 def figure_png_bytes(fig) -> bytes:
@@ -204,6 +220,8 @@ def vline_markers_for_labels(summary_df: pd.DataFrame, inputs_df: pd.DataFrame, 
 def build_plot_assets(
     selected_summary: pd.DataFrame,
     results_df: pd.DataFrame,
+    titration_df: pd.DataFrame,
+    langmuir_df: pd.DataFrame,
     inputs_df: pd.DataFrame,
     channel_filter: List[int],
     current_metric: str,
@@ -211,15 +229,13 @@ def build_plot_assets(
 ) -> dict[str, bytes]:
     assets = {}
     x_col = default_x_column(results_df)
-    if not x_col:
-        return assets
 
     for _, row in selected_summary.iterrows():
         label = row.get("experiment_label")
         plot_key = label or row.get("experiment_name")
         vlines = vline_markers_for_labels(selected_summary, inputs_df, [label])
 
-        if current_metric:
+        if x_col and current_metric:
             fig = plot_metric_vs_scan(
                 results_df,
                 current_metric,
@@ -233,7 +249,7 @@ def build_plot_assets(
                 assets[plot_path(plot_key, "current_peak_height")] = figure_png_bytes(fig)
                 close_figure(fig)
 
-        if voltage_metric:
+        if x_col and voltage_metric:
             fig = plot_metric_vs_scan(
                 results_df,
                 voltage_metric,
@@ -247,12 +263,25 @@ def build_plot_assets(
                 assets[plot_path(plot_key, "peak_voltage_drift")] = figure_png_bytes(fig)
                 close_figure(fig)
 
+        if not titration_df.empty and not langmuir_df.empty:
+            fig = plot_langmuir_curves(
+                titration_df,
+                langmuir_df,
+                None,
+                [label],
+                channel_filter,
+                legend_style="channel",
+            )
+            if fig:
+                assets[plot_path(plot_key, "kd_fit")] = figure_png_bytes(fig)
+                close_figure(fig)
+
     return assets
 
 
 def display_plot_markers(comparison_df: pd.DataFrame, plot_assets: dict[str, bytes]) -> pd.DataFrame:
     out = comparison_df.copy()
-    for col in ["Current Peak Height Plot", "Peak Voltage Drift Plot"]:
+    for col in ["Current Peak Height Plot", "Peak Voltage Drift Plot", "Kd Fit Plot"]:
         if col not in out.columns:
             continue
         out[col] = out[col].apply(lambda value: "[embedded PNG]" if value in plot_assets else "")
@@ -269,7 +298,7 @@ def build_navigation_pack(comparison_df: pd.DataFrame, plot_assets: dict[str, by
 
 
 def build_html_report(comparison_df: pd.DataFrame, plot_assets: dict[str, bytes]) -> bytes:
-    plot_cols = {"Current Peak Height Plot", "Peak Voltage Drift Plot"}
+    plot_cols = {"Current Peak Height Plot", "Peak Voltage Drift Plot", "Kd Fit Plot"}
     parts = [
         "<!doctype html>",
         "<html><head><meta charset='utf-8'>",
@@ -387,20 +416,31 @@ langmuir_df = combine_table(bundles, "langmuir_fit_summary", selected_labels)
 inputs_df = combine_table(bundles, "signal_processing_inputs", selected_labels)
 
 analysis_modes = sorted(selected_summary["analysis_mode"].dropna().astype(str).unique())
-channels = []
-if not results_df.empty and "channel" in results_df.columns:
-    channels = sorted(pd.to_numeric(results_df["channel"], errors="coerce").dropna().astype(int).unique())
+detected_channel_metric = metric_column(results_df, DEFAULT_CURRENT_METRICS)
+base_successful_channels = successful_channel_map(inputs_df, langmuir_df, results_df, detected_channel_metric)
+channels = channel_union(base_successful_channels)
 
 top_cols = st.columns(4)
 top_cols[0].metric("Experiments", len(selected_labels))
 top_cols[1].metric("Rows", len(results_df))
-top_cols[2].metric("Channels", len(channels))
+top_cols[2].metric("Successful Channels", len(channels))
 top_cols[3].metric("Modes", ", ".join(analysis_modes) if analysis_modes else "-")
 
 if channels:
     channel_filter = st.multiselect("Channels", options=channels, default=channels)
 else:
     channel_filter = []
+    st.caption("No successful channels were detected from signal-processing inputs, valid Kd fits, or valid peak metrics.")
+
+successful_channels = restrict_channel_map(base_successful_channels, channel_filter)
+if not channel_filter:
+    analysis_results_df = results_df.iloc[0:0].copy()
+    analysis_titration_df = titration_df.iloc[0:0].copy()
+    analysis_langmuir_df = langmuir_df.iloc[0:0].copy()
+else:
+    analysis_results_df = filter_successful_channels(results_df, successful_channels, channel_filter)
+    analysis_titration_df = filter_successful_channels(titration_df, successful_channels, channel_filter)
+    analysis_langmuir_df = filter_successful_channels(langmuir_df, successful_channels, channel_filter)
 
 view = st.radio(
     "View",
@@ -413,9 +453,12 @@ if view == "Overview":
     st.subheader("Loaded Bundles")
     st.dataframe(selected_summary, use_container_width=True, height=260)
 
-    if not langmuir_df.empty and "langmuir_kd" in langmuir_df.columns:
+    if not analysis_langmuir_df.empty and "langmuir_kd" in analysis_langmuir_df.columns:
         st.markdown("#### Kd Snapshot")
-        fig = plot_kd_comparison(langmuir_df)
+        fig = plot_kd_comparison(
+            analysis_langmuir_df,
+            legend_style="channel" if len(selected_labels) == 1 else "experiment_channel",
+        )
         if fig:
             st.pyplot(fig)
 
@@ -464,10 +507,13 @@ elif view == "Comparison Index":
             langmuir_df,
             current_metric=current_metric or None,
             voltage_metric=voltage_metric or None,
+            successful_channels=successful_channels,
         )
         plot_assets = build_plot_assets(
             selected_summary,
-            results_df,
+            analysis_results_df,
+            analysis_titration_df,
+            analysis_langmuir_df,
             inputs_df,
             channel_filter,
             current_metric,
@@ -521,11 +567,11 @@ elif view == "Processing Inputs":
 
 elif view == "Scan Metrics":
     st.subheader("Metric vs Scan")
-    if results_df.empty:
-        st.info("No results table was found.")
+    if analysis_results_df.empty:
+        st.info("No successful result rows match the selected output/channel filters.")
     else:
         metric_options = numeric_columns(
-            results_df,
+            analysis_results_df,
             exclude={
                 "channel", "scan_number", "original_scan_number", "filtered_source_scan_number",
                 "frequency_hz", "measurement_index", "cycle_count_in_file", "method_nscans",
@@ -533,7 +579,7 @@ elif view == "Scan Metrics":
         )
         metric_options = [col for col in metric_options if is_scan_metric_column(col)]
         default_metric = "peak_current_selected" if "peak_current_selected" in metric_options else (metric_options[0] if metric_options else None)
-        x_options = [col for col in ["scan_number", "filtered_source_scan_number", "original_scan_number", "measurement_index"] if col in results_df.columns]
+        x_options = [col for col in ["scan_number", "filtered_source_scan_number", "original_scan_number", "measurement_index"] if col in analysis_results_df.columns]
         if not metric_options:
             st.info("No scan-varying metric columns were found after filtering out scalar signal parameters.")
         else:
@@ -542,7 +588,7 @@ elif view == "Scan Metrics":
             legend_style = "channel" if len(selected_labels) == 1 else "experiment_channel"
             reference_x_values = vline_markers_for_labels(selected_summary, inputs_df, selected_labels)
             fig = plot_metric_vs_scan(
-                results_df,
+                analysis_results_df,
                 metric_col,
                 selected_labels,
                 channel_filter,
@@ -558,32 +604,50 @@ elif view == "Scan Metrics":
 
 elif view == "Titration":
     st.subheader("Titration Plateaus")
-    if titration_df.empty:
-        st.info("No titration_steps table was found for the selected experiments.")
+    if analysis_titration_df.empty:
+        st.info("No successful titration rows match the selected output/channel filters.")
     else:
-        metric_labels = sorted(titration_df.get("metric_label", pd.Series(["plateau"])).dropna().astype(str).unique())
+        metric_labels = sorted(analysis_titration_df.get("metric_label", pd.Series(["plateau"])).dropna().astype(str).unique())
         metric_label = st.selectbox("Titration metric", metric_labels)
-        fig = plot_titration_plateaus(titration_df, metric_label, selected_labels, channel_filter)
+        fig = plot_titration_plateaus(
+            analysis_titration_df,
+            metric_label,
+            selected_labels,
+            channel_filter,
+            legend_style="channel" if len(selected_labels) == 1 else "experiment_channel",
+        )
         if fig:
             st.pyplot(fig)
-        st.dataframe(filter_by_metric_label(titration_df, metric_label), use_container_width=True, height=260)
+        st.dataframe(filter_by_metric_label(analysis_titration_df, metric_label), use_container_width=True, height=260)
 
 
 elif view == "Langmuir / Kd":
     st.subheader("Langmuir Fits and Kd")
-    if langmuir_df.empty:
-        st.info("No langmuir_fit_summary table was found for the selected experiments.")
+    if analysis_langmuir_df.empty:
+        st.info("No successful Langmuir/Kd rows match the selected output/channel filters.")
     else:
-        metric_labels = sorted(langmuir_df.get("metric_label", pd.Series(["fit"])).dropna().astype(str).unique())
+        metric_labels = sorted(analysis_langmuir_df.get("metric_label", pd.Series(["fit"])).dropna().astype(str).unique())
         metric_label = st.selectbox("Langmuir metric", metric_labels)
-        kd_fig = plot_kd_comparison(langmuir_df, metric_label=metric_label)
+        legend_style = "channel" if len(selected_labels) == 1 else "experiment_channel"
+        kd_fig = plot_kd_comparison(analysis_langmuir_df, metric_label=metric_label, legend_style=legend_style)
         if kd_fig:
             st.pyplot(kd_fig)
-        if not titration_df.empty:
-            curve_fig = plot_langmuir_curves(titration_df, langmuir_df, metric_label, selected_labels, channel_filter)
+        if not analysis_titration_df.empty:
+            curve_fig = plot_langmuir_curves(
+                analysis_titration_df,
+                analysis_langmuir_df,
+                metric_label,
+                selected_labels,
+                channel_filter,
+                legend_style=legend_style,
+            )
             if curve_fig:
                 st.pyplot(curve_fig)
-        filtered = filter_by_metric_label(langmuir_df, metric_label)
+        filtered = filter_by_metric_label(analysis_langmuir_df, metric_label)
+        if "langmuir_kd" in filtered.columns:
+            average = pd.to_numeric(filtered["langmuir_kd"], errors="coerce").dropna()
+            if not average.empty:
+                st.metric("Average Kd", f"{average.mean():.6g}")
         st.dataframe(filtered, use_container_width=True, height=300)
 
 

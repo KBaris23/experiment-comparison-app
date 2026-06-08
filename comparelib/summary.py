@@ -7,6 +7,8 @@ from typing import Iterable, Optional
 
 import pandas as pd
 
+from comparelib.channels import ChannelMap
+
 
 DEFAULT_CURRENT_METRICS = (
     "peak_current_selected",
@@ -230,14 +232,31 @@ def _infer_thiol_count(experiment_name: str) -> str:
     return ""
 
 
-def _channel_list(df: pd.DataFrame) -> str:
+def _filter_channels(df: pd.DataFrame, channels: Optional[Iterable[int]]) -> pd.DataFrame:
+    if df.empty or channels is None or "channel" not in df.columns:
+        return df
+    channels = set(channels)
+    if not channels:
+        return df.iloc[0:0].copy()
+    return df[pd.to_numeric(df["channel"], errors="coerce").isin(set(channels))]
+
+
+def _channel_list(df: pd.DataFrame, channels: Optional[Iterable[int]] = None) -> str:
+    if channels is not None:
+        return ", ".join(str(value) for value in sorted(set(channels)))
     if df.empty or "channel" not in df.columns:
         return ""
     channels = pd.to_numeric(df["channel"], errors="coerce").dropna().astype(int).drop_duplicates().sort_values()
     return ", ".join(str(value) for value in channels.tolist())
 
 
-def _successful_channel_count(df: pd.DataFrame, metric_col: Optional[str]) -> object:
+def _successful_channel_count(
+    df: pd.DataFrame,
+    metric_col: Optional[str],
+    channels: Optional[Iterable[int]] = None,
+) -> object:
+    if channels is not None:
+        return int(len(set(channels)))
     if df.empty or "channel" not in df.columns:
         return ""
     if metric_col and metric_col in df.columns:
@@ -266,6 +285,28 @@ def _max(df: pd.DataFrame, col: Optional[str]) -> object:
     return _format_number(values.max())
 
 
+def _average_kd(df: pd.DataFrame, channels: Optional[Iterable[int]] = None) -> object:
+    if df.empty or "langmuir_kd" not in df.columns:
+        return ""
+    df = _filter_channels(df, channels)
+    values = pd.to_numeric(df["langmuir_kd"], errors="coerce").dropna()
+    if values.empty:
+        return ""
+    return _format_number(values.mean())
+
+
+def _has_kd_fit(df: pd.DataFrame, channels: Optional[Iterable[int]] = None) -> bool:
+    required = {"langmuir_kd", "langmuir_baseline", "langmuir_amplitude", "channel"}
+    if df.empty or not required.issubset(df.columns):
+        return False
+    df = _filter_channels(df, channels)
+    return (
+        pd.to_numeric(df["langmuir_kd"], errors="coerce").notna()
+        & pd.to_numeric(df["langmuir_baseline"], errors="coerce").notna()
+        & pd.to_numeric(df["langmuir_amplitude"], errors="coerce").notna()
+    ).any()
+
+
 def build_comparison_summary(
     manifest_summary: pd.DataFrame,
     results: pd.DataFrame,
@@ -273,6 +314,7 @@ def build_comparison_summary(
     langmuir_summary: pd.DataFrame,
     current_metric: Optional[str] = None,
     voltage_metric: Optional[str] = None,
+    successful_channels: Optional[ChannelMap] = None,
 ) -> pd.DataFrame:
     current_col = current_metric or metric_column(results, DEFAULT_CURRENT_METRICS)
     voltage_col = voltage_metric or metric_column(results, DEFAULT_VOLTAGE_METRICS)
@@ -291,6 +333,8 @@ def build_comparison_summary(
             if "experiment_label" in langmuir_summary.columns
             else pd.DataFrame()
         )
+        row_channels = None if successful_channels is None else set(successful_channels.get(str(label), set()))
+        metric_result_rows = _filter_channels(result_rows, row_channels)
 
         frequency = _unique_value_from_columns(result_rows, ["frequency_hz", "frequency", "frequency_Hz"])
         aptamer_type = _first_value(input_rows, ["aptamer_type", "aptamer", "target_aptamer"]) or _infer_aptamer_type(experiment_name)
@@ -303,8 +347,8 @@ def build_comparison_summary(
             "Aptamer Type": aptamer_type,
             "Chip Type": chip_type,
             "Thiol Count": thiol_count,
-            "Successful Channels": _successful_channel_count(result_rows, current_col),
-            "Channel List": _channel_list(result_rows),
+            "Successful Channels": _successful_channel_count(result_rows, current_col, row_channels),
+            "Channel List": _channel_list(result_rows, row_channels),
             "Vlines": _clean_text(manifest_row.get("analysis_vlines_json")) or _input_value(input_rows, "analysis_vlines_json"),
         }
         for col in input_parameter_cols:
@@ -313,9 +357,11 @@ def build_comparison_summary(
             {
                 "Current Peak Height Plot": plot_path(plot_key, "current_peak_height"),
                 "Peak Voltage Drift Plot": plot_path(plot_key, "peak_voltage_drift") if voltage_col else "",
-                "Max Peak Height": _max(result_rows, current_col),
-                "Peak Height Range": _range(result_rows, current_col),
-                "Peak Voltage Drift Range": _range(result_rows, voltage_col),
+                "Kd Fit Plot": plot_path(plot_key, "kd_fit") if _has_kd_fit(fit_rows, row_channels) else "",
+                "Average Kd": _average_kd(fit_rows, row_channels),
+                "Max Peak Height": _max(metric_result_rows, current_col),
+                "Peak Height Range": _range(metric_result_rows, current_col),
+                "Peak Voltage Drift Range": _range(metric_result_rows, voltage_col),
             }
         )
         rows.append(row)
@@ -332,6 +378,8 @@ def build_comparison_summary(
         *[parameter_label(col) for col in input_parameter_cols],
         "Current Peak Height Plot",
         "Peak Voltage Drift Plot",
+        "Kd Fit Plot",
+        "Average Kd",
         "Max Peak Height",
         "Peak Height Range",
         "Peak Voltage Drift Range",
