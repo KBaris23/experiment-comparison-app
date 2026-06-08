@@ -35,10 +35,23 @@ HANDLED_INPUT_COLUMNS = (
     "aptamer_type",
     "aptamer",
     "target_aptamer",
+    "chip_type",
+    "chip",
+    "chip_name",
+    "chip_model",
+    "electrode_chip",
     "thiol_count",
     "thiol_type",
     "thiol",
     "analysis_vlines_json",
+)
+
+CHIP_TYPE_COLUMNS = (
+    "chip_type",
+    "chip",
+    "chip_name",
+    "chip_model",
+    "electrode_chip",
 )
 
 PARAMETER_KEYWORDS = (
@@ -93,6 +106,15 @@ def _first_value(df: pd.DataFrame, columns: Iterable[str]) -> str:
         values = [value for value in values if value]
         if values:
             return values[0]
+    return ""
+
+
+def _first_row_value(row: pd.Series, columns: Iterable[str]) -> str:
+    for col in columns:
+        if col in row.index:
+            value = _clean_text(row.get(col))
+            if value:
+                return value
     return ""
 
 
@@ -272,12 +294,14 @@ def build_comparison_summary(
 
         frequency = _unique_value_from_columns(result_rows, ["frequency_hz", "frequency", "frequency_Hz"])
         aptamer_type = _first_value(input_rows, ["aptamer_type", "aptamer", "target_aptamer"]) or _infer_aptamer_type(experiment_name)
+        chip_type = _first_value(input_rows, CHIP_TYPE_COLUMNS) or _first_row_value(manifest_row, CHIP_TYPE_COLUMNS)
         thiol_count = _first_value(input_rows, ["thiol_count", "thiol_type", "thiol"]) or _infer_thiol_count(experiment_name)
 
         row = {
             "Experiment ID": experiment_name,
             "Frequency": frequency,
             "Aptamer Type": aptamer_type,
+            "Chip Type": chip_type,
             "Thiol Count": thiol_count,
             "Successful Channels": _successful_channel_count(result_rows, current_col),
             "Channel List": _channel_list(result_rows),
@@ -300,6 +324,7 @@ def build_comparison_summary(
         "Experiment ID",
         "Frequency",
         "Aptamer Type",
+        "Chip Type",
         "Thiol Count",
         "Successful Channels",
         "Channel List",
