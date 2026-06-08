@@ -22,7 +22,6 @@ import streamlit as st
 
 from comparelib.channels import (
     channel_union,
-    filter_successful_channels,
     successful_channel_map,
 )
 from comparelib.io import (
@@ -94,15 +93,79 @@ def filter_by_metric_label(df: pd.DataFrame, metric_label: str) -> pd.DataFrame:
     return df[df["metric_label"].astype(str) == str(metric_label)]
 
 
-def restrict_channel_map(channel_map: dict[str, set[int]], channels: List[int]) -> dict[str, set[int]]:
-    if not channels:
-        return {}
+def channel_options_from_tables(*tables: pd.DataFrame) -> list[int]:
+    channels: set[int] = set()
+    for table in tables:
+        if table.empty or "channel" not in table.columns:
+            continue
+        values = pd.to_numeric(table["channel"], errors="coerce").dropna()
+        channels.update(int(value) for value in values.tolist())
+    return sorted(channels)
+
+
+def channel_map_from_tables(labels: List[str], *tables: pd.DataFrame) -> dict[str, set[int]]:
+    channel_map = {str(label): set() for label in labels}
+    for table in tables:
+        if table.empty or "channel" not in table.columns:
+            continue
+        if "experiment_label" not in table.columns:
+            values = pd.to_numeric(table["channel"], errors="coerce").dropna()
+            for label in channel_map:
+                channel_map[label].update(int(value) for value in values.tolist())
+            continue
+        numeric_channel = pd.to_numeric(table["channel"], errors="coerce")
+        labels_as_text = table["experiment_label"].astype(str)
+        for label in channel_map:
+            values = numeric_channel[labels_as_text.eq(label)].dropna()
+            channel_map[label].update(int(value) for value in values.tolist())
+    return channel_map
+
+
+def default_channel_map(labels: List[str], available: dict[str, set[int]], successful: dict[str, set[int]]) -> dict[str, set[int]]:
+    defaults = {}
+    for label in labels:
+        label_text = str(label)
+        available_channels = set(available.get(label_text, set()))
+        default_channels = set(successful.get(label_text, set())) & available_channels
+        defaults[label_text] = default_channels or available_channels
+    return defaults
+
+
+def filter_selected_channels(df: pd.DataFrame, channels: List[int]) -> pd.DataFrame:
+    if df.empty or "channel" not in df.columns:
+        return df
     selected = set(channels)
-    return {
-        label: values & selected
-        for label, values in channel_map.items()
-        if values & selected
-    }
+    if not selected:
+        return df.iloc[0:0].copy()
+    numeric_channel = pd.to_numeric(df["channel"], errors="coerce")
+    return df[numeric_channel.isin(selected)].copy()
+
+
+def filter_selected_channel_map(df: pd.DataFrame, channel_map: dict[str, set[int]]) -> pd.DataFrame:
+    if df.empty or "channel" not in df.columns:
+        return df
+    selected_union = set(channel_union(channel_map))
+    if not selected_union:
+        return df.iloc[0:0].copy()
+    if "experiment_label" not in df.columns:
+        return filter_selected_channels(df, sorted(selected_union))
+
+    numeric_channel = pd.to_numeric(df["channel"], errors="coerce")
+    labels = df["experiment_label"].astype(str)
+    mask = pd.Series(False, index=df.index)
+    for label, selected in channel_map.items():
+        if selected:
+            mask |= labels.eq(str(label)) & numeric_channel.isin(selected)
+    return df[mask].copy()
+
+
+def selected_channel_map(labels: List[str], channels: List[int]) -> dict[str, set[int]]:
+    selected = set(channels)
+    return {str(label): selected for label in labels} if selected else {}
+
+
+def explicit_channel_sources(inputs_df: pd.DataFrame, selected_summary: pd.DataFrame) -> pd.DataFrame:
+    return pd.concat([inputs_df, selected_summary], ignore_index=True, sort=False)
 
 
 def figure_png_bytes(fig) -> bytes:
@@ -417,30 +480,71 @@ inputs_df = combine_table(bundles, "signal_processing_inputs", selected_labels)
 
 analysis_modes = sorted(selected_summary["analysis_mode"].dropna().astype(str).unique())
 detected_channel_metric = metric_column(results_df, DEFAULT_CURRENT_METRICS)
-base_successful_channels = successful_channel_map(inputs_df, langmuir_df, results_df, detected_channel_metric)
-channels = channel_union(base_successful_channels)
+base_successful_channels = successful_channel_map(
+    explicit_channel_sources(inputs_df, selected_summary),
+    langmuir_df,
+    results_df,
+    detected_channel_metric,
+    include_metric_fallback=False,
+)
+available_channel_map = channel_map_from_tables(selected_labels, results_df, titration_df, langmuir_df)
+default_channels_by_output = default_channel_map(selected_labels, available_channel_map, base_successful_channels)
+channels = channel_options_from_tables(results_df, titration_df, langmuir_df)
+default_channels = [channel for channel in channel_union(default_channels_by_output) if channel in set(channels)]
+
+if channels:
+    global_channel_filter = st.multiselect(
+        "Channels",
+        options=channels,
+        default=default_channels,
+        help="Broad channel selection. When comparing multiple outputs, refine each output below.",
+    )
+else:
+    global_channel_filter = []
+    st.caption("No channel rows were detected in results, titration, or Langmuir tables.")
+
+if len(selected_labels) > 1 and global_channel_filter:
+    summary_channels = {}
+    global_selected = set(global_channel_filter)
+    global_key = "_".join(str(channel) for channel in global_channel_filter)
+    with st.expander("Per-output channel selection", expanded=False):
+        for label in selected_labels:
+            label_text = str(label)
+            options = sorted(set(available_channel_map.get(label_text, set())) & global_selected)
+            default = sorted(set(default_channels_by_output.get(label_text, set())) & set(options))
+            selected = st.multiselect(
+                label_text,
+                options=options,
+                default=default,
+                key=f"channels_for_{label_text}_{global_key}",
+            )
+            summary_channels[label_text] = set(selected)
+elif global_channel_filter:
+    summary_channels = selected_channel_map(selected_labels, global_channel_filter)
+else:
+    summary_channels = {}
+
+channel_filter = channel_union(summary_channels)
 
 top_cols = st.columns(4)
 top_cols[0].metric("Experiments", len(selected_labels))
 top_cols[1].metric("Rows", len(results_df))
-top_cols[2].metric("Successful Channels", len(channels))
+top_cols[2].metric("Selected Channels", sum(len(values) for values in summary_channels.values()))
 top_cols[3].metric("Modes", ", ".join(analysis_modes) if analysis_modes else "-")
-
 if channels:
-    channel_filter = st.multiselect("Channels", options=channels, default=channels)
-else:
-    channel_filter = []
-    st.caption("No successful channels were detected from signal-processing inputs, valid Kd fits, or valid peak metrics.")
+    if default_channels == channels and not base_successful_channels:
+        st.caption("No explicitly successful channels were detected; defaulting to all available channels.")
+    else:
+        st.caption(f"Explicitly successful default channels detected: {len(default_channels)}")
 
-successful_channels = restrict_channel_map(base_successful_channels, channel_filter)
 if not channel_filter:
     analysis_results_df = results_df.iloc[0:0].copy()
     analysis_titration_df = titration_df.iloc[0:0].copy()
     analysis_langmuir_df = langmuir_df.iloc[0:0].copy()
 else:
-    analysis_results_df = filter_successful_channels(results_df, successful_channels, channel_filter)
-    analysis_titration_df = filter_successful_channels(titration_df, successful_channels, channel_filter)
-    analysis_langmuir_df = filter_successful_channels(langmuir_df, successful_channels, channel_filter)
+    analysis_results_df = filter_selected_channel_map(results_df, summary_channels)
+    analysis_titration_df = filter_selected_channel_map(titration_df, summary_channels)
+    analysis_langmuir_df = filter_selected_channel_map(langmuir_df, summary_channels)
 
 view = st.radio(
     "View",
@@ -507,7 +611,7 @@ elif view == "Comparison Index":
             langmuir_df,
             current_metric=current_metric or None,
             voltage_metric=voltage_metric or None,
-            successful_channels=successful_channels,
+            successful_channels=summary_channels,
         )
         plot_assets = build_plot_assets(
             selected_summary,

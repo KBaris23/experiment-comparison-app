@@ -124,6 +124,7 @@ def successful_channel_map(
     langmuir_summary: pd.DataFrame,
     results: pd.DataFrame,
     metric_col: Optional[str] = None,
+    include_metric_fallback: bool = True,
 ) -> ChannelMap:
     labels: set[str] = set()
     for df in (inputs, langmuir_summary, results):
@@ -139,7 +140,7 @@ def successful_channel_map(
         channels = _channels_from_inputs(input_rows)
         if not channels:
             channels = _channels_from_kd(fit_rows)
-        if not channels:
+        if not channels and include_metric_fallback:
             channels = _channels_from_metric(result_rows, metric_col)
         if channels:
             channel_map[label] = channels

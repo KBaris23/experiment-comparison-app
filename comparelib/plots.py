@@ -161,6 +161,7 @@ def plot_langmuir_curves(
 
     fig, ax = plt.subplots(figsize=(10, 4.8))
     plotted = False
+    max_data_x = None
     key_cols = ["experiment_label", "channel"]
     include_metric_key = not metric_label and "metric_label" in steps.columns and "metric_label" in fits.columns
     if include_metric_key:
@@ -192,6 +193,8 @@ def plot_langmuir_curves(
         order = np.argsort(x.to_numpy())
         x_sorted = x.to_numpy()[order]
         y_sorted = y.to_numpy()[order]
+        current_max = float(np.nanmax(x_sorted))
+        max_data_x = current_max if max_data_x is None else max(max_data_x, current_max)
         label = _series_label(experiment, channel, legend_style, fit_metric_label)
         ax.scatter(x_sorted, y_sorted, s=26, label=label)
         x_dense = np.linspace(float(np.nanmin(x_sorted)), float(np.nanmax(x_sorted)), 300)
@@ -204,6 +207,8 @@ def plot_langmuir_curves(
     if not plotted:
         plt.close(fig)
         return None
+    if max_data_x is not None and np.isfinite(max_data_x):
+        ax.set_xlim(right=max_data_x)
     unit = ""
     if "step_concentration_unit" in steps.columns:
         units = [str(v) for v in steps["step_concentration_unit"].dropna().unique() if str(v)]
